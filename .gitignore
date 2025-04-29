@@ -1,0 +1,13 @@
+# virtual environment
+.venv
+
+# secrets
+credentials.json
+token.json
+.env
+
+# MacOS stuffs
+.DS_Store
+
+# experiment notebooks
+/notebooks
