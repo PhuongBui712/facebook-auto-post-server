@@ -49,7 +49,7 @@ get_page_access_data = lambda: get_orchestrated_page_tokens(
 # Removed retry constants as they are not needed for dummy endpoints
 # MAX_RETRY = 3
 # WAITING_TIME = 30
-SLEEP_TIME = 0 * 60 # Define sleep time for dummy endpoints
+SLEEP_TIME = 5.5 * 60 # Define sleep time for dummy endpoints
 
 
 @app.post("/feed", tags=["feed"], response_model=BasicResponse)

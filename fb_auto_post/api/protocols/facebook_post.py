@@ -1,9 +1,9 @@
 from typing import Optional, List, Literal
 
-from pydantic import BaseModel, AnyUrl
+from pydantic import BaseModel, AnyUrl, Field
 
 
-ResponseStatus = Literal["success", "error"]
+ResponseStatus = Literal["success", "error", "accepted"]
 
 
 class ProcessVideoStatus(BaseModel):
@@ -14,20 +14,24 @@ class ProcessVideoStatus(BaseModel):
 class PostFeedRequest(BaseModel):
     caption: Optional[str] = ""
     photo: Optional[List[str]] = []
+    task_id: str = Field(..., description="Unique identifier for the task")
 
 
 class PostPhotoStoryRequest(BaseModel):
     photo: str
+    task_id: str = Field(..., description="Unique identifier for the task")
 
 
 class PostVideoStoryRequest(BaseModel):
     video: str
+    task_id: str = Field(..., description="Unique identifier for the task")
 
 
 class PostReelRequest(BaseModel):
     caption: Optional[str] = ""
     video: str
     share_to_story: bool = False
+    task_id: str = Field(..., description="Unique identifier for the task")
 
 
 class ReelResponse(BaseModel):
@@ -39,6 +43,7 @@ class PostVideoRequest(BaseModel):
     caption: str = ""
     video: str
     thumbnail: str = ""
+    task_id: str = Field(..., description="Unique identifier for the task")
 
 
 class BasicResponse(BaseModel):
@@ -50,7 +55,7 @@ class PagePostContentResponse(BaseModel):
     status: Literal["success", "in_progress", "error", "retry"]
     content_type: Literal["reel", "story"]
     page_names: str
-    page_url: AnyUrl
+    page_url: str
     msg: Optional[str]
 
 
