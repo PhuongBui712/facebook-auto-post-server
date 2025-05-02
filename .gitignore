@@ -1,6 +1,9 @@
 # virtual environment
 .venv
 
+# python cache
+__pycache__
+
 # secrets
 credentials.json
 token.json
