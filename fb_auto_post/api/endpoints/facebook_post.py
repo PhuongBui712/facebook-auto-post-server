@@ -42,8 +42,8 @@ reel_poster = FacebookReelAPI()
 video_poster = FacebookVideoAPI()
 
 get_page_access_data = lambda: get_orchestrated_page_tokens(
-    spreadsheet_id=os.getenv("DEV_SHEET_ID"),
-    range_name=os.getenv("DEV_USER_ACCESS_TOKEN_SHEET_NAME")
+    spreadsheet_id=os.getenv("PROD_SHEET_ID"),
+    range_name=os.getenv("PROD_USER_ACCESS_TOKEN_SHEET_NAME")
 )
 
 
@@ -489,6 +489,194 @@ async def create_video_story(request: PostVideoStoryRequest):
         ]
 
 
+async def post_video_story(request: PostVideoStoryRequest) -> List[PagePostContentResponse]:
+    """
+    Create a story with a video.
+    - video_path: File path to the video
+    """
+    try:
+        page_responses: List[PagePostContentResponse] = []
+        # orchestrate page tokens to accounts
+        page_access_data = await get_page_access_data()
+
+        # define posting tag
+        semaphore = asyncio.Semaphore(6)
+        async def post_story_video_safe(page):
+            async with semaphore:
+                try:
+                    response = await story_poster.post_story_video(
+                        page_id=page["page_id"],
+                        access_token=page["access_token"],
+                        video_path=request.video  # Corrected parameter name
+                    )
+                    return page, response
+                except Exception as e:
+                    logger.error(f"Error posting to page {page['page_id']}: {e}")
+                    return page, {}
+
+        # start posting process
+        running_time = 0
+        unpublished_pages: List[Dict[str, str]] = page_access_data.copy()
+        success_pages: List[Dict[str, str]] = []
+        in_progress_pages: List[Tuple[Dict[str, str], str]] = []
+        error_pages: List[Tuple[Dict[str, str], str]] = []
+        while unpublished_pages and running_time < MAX_RETRY:
+            # post content
+            publish_tasks = [post_story_video_safe(page) for page in unpublished_pages]
+            results = await asyncio.gather(*publish_tasks)
+
+            # sleep a while for server have time to complete
+            await asyncio.sleep(WAITING_TIME)
+
+            # define getting publishing status task
+            async def get_publishing_status(page: Dict[str, str], video_id: Optional[str]) -> ProcessVideoStatus:
+                if not video_id:
+                    return ProcessVideoStatus(status="retry")
+
+                retries = 3
+                for attempt in range(retries):
+                    try:
+                        status = await story_poster.get_video_story_status(
+                            video_id=video_id,
+                            access_token=page["access_token"]
+                        )
+
+                        # Publishing successfully
+                        if status["publishing_phase"]["status"] == "complete":
+                            return ProcessVideoStatus(status="success")
+                        
+                        elif status["processing_phase"]["status"] == "error":
+                            # encounter "Creating error" while processing, retry
+                            if (
+                                len(status["processing_phase"]["errors"]) == 1
+                                and status["processing_phase"]["errors"][0].get("code") == 1363008
+                            ):
+                                return ProcessVideoStatus(status="retry")
+                            
+                            # encounter more than 1 error
+                            else:
+                                error_messages = "\n".join(f"* {error['message']}" for error in status["processing_phase"]["errors"])
+                                return ProcessVideoStatus(status="error", msg=error_messages)
+
+                        # publishing error, retry
+                        if status["publishing_phase"]["status"] == "error":
+                            return ProcessVideoStatus(status="retry")
+                        
+                        # The video itself is already corrupted.
+                        elif (
+                            "error" in status["processing_phase"]
+                            and status["processing_phase"]["errors"][0]["code"] != 1363008
+                        ):
+                            error_messages = "\n".join(f"* {error['message']}" for error in status["processing_phase"]["errors"])
+                            return ProcessVideoStatus(status="error", msg=error_messages)
+
+                        # Not started or in progress
+                        elif (
+                            status["processing_phase"]["status"] in ("not_started", "in_progress") or
+                            status["publishing_phase"]["status"] in ("not_started", "in_progress")
+                        ):
+                            return ProcessVideoStatus(status="in_progress")
+                        
+                        # Copyright error
+                        elif "copyright_check_status" in status and status["copyright_check_status"]["status"] == "error":
+                            return ProcessVideoStatus(status="error", msg="Copyright error detected")
+
+                    except Exception as e:
+                        logger.warning(f"Attempt {attempt + 1} failed for page {page['page_id']}: {e}")
+                        if attempt == retries - 1:
+                            logger.error(f"Max retries reached for page {page['page_id']}.  Failing.")
+                            return ProcessVideoStatus(status="error", msg=str(e))
+                        await asyncio.sleep((attempt) + 1 * 5)
+
+                return ProcessVideoStatus(status="retry")
+
+            # conduct getting publishing status tasks
+            data_to_get_status = in_progress_pages.copy() + [(page, result[1].get("video_id")) for page, result in zip(unpublished_pages, results)]
+            status_results: List[ProcessVideoStatus] = await asyncio.gather(*[
+                get_publishing_status(page, video_id)
+                for page, video_id in data_to_get_status
+            ])
+
+            # check status
+            unpublished_pages = []
+            in_progress_pages = []
+            for (page, video_id), process_status in zip(data_to_get_status, status_results):
+                process_status: ProcessVideoStatus
+                if process_status.status == "error":
+                    error_pages.append((page, process_status.msg or "Can not publishing this video"))
+                elif process_status.status == "retry":
+                    unpublished_pages.append(page)
+                elif process_status.status == "in_progress":
+                    in_progress_pages.append((page, video_id))
+                else:
+                    success_pages.append(page)
+            
+            # increase running count
+            running_time += 1
+
+        # synthesize results
+        page_responses = [
+            PagePostContentResponse(
+                status="success",
+                content_type="story",
+                page_names=page["page_name"],
+                page_url=f"https://facebook.com/{page['page_id']}",
+                msg="Video posted successfully"
+            )
+            for page in success_pages
+        ]
+        page_responses.extend(
+            [
+                PagePostContentResponse(
+                    status="in_progress",
+                    content_type="story",
+                    page_names=page["page_name"],
+                    page_url=f"https://facebook.com/{page['page_id']}",
+                    msg="Video is still processing"
+                )
+                for page, video_id in in_progress_pages
+            ]
+        )
+        page_responses.extend(
+            [
+                PagePostContentResponse(
+                    status="retry",
+                    content_type="story",
+                    page_names=page["page_name"],
+                    page_url=f"https://facebook.com/{page['page_id']}",
+                    msg=f"Can not publish to page after {MAX_RETRY} attempts"
+                )
+                for page in unpublished_pages
+            ]
+        )
+        page_responses.extend(
+            [
+                PagePostContentResponse(
+                    status="error",
+                    content_type="story",
+                    page_names=page["page_name"],
+                    page_url=f"https://facebook.com/{page['page_id']}",
+                    msg=msg
+                )
+                for page, msg in error_pages
+            ]
+        )
+
+    except Exception as e:
+        logger.exception(f"An unexpected error occurred during video story creation: {e}")
+        page_responses = [
+            PagePostContentResponse(
+                status="error",
+                page_names="Unknown",
+                page_url="https://facebook.com/",
+                msg=f"An unexpected error occurred: {e}"
+            )
+        ]
+    
+    finally:
+        return page_responses
+
+
 # Reel endpoint
 @app.post("/reel", tags=["reel"], response_model=BasicResponse)
 async def create_reel(request: PostReelRequest):
@@ -669,15 +857,14 @@ async def create_reel(request: PostReelRequest):
             )
 
             if request.share_to_story:
-                post_video_story_res = await create_video_story(
+                post_video_story_responses = await post_video_story(
                     request=PostVideoStoryRequest(
                         video=request.video,
                         task_id=request.task_id
                     )
                 )
-                page_responses.extend(post_video_story_res)
-
-            # delete file
+                page_responses.extend(post_video_story_responses)
+            
             force_remove(request.video)
 
             response = PostContentResponse(page_responses=page_responses)

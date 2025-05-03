@@ -5,8 +5,6 @@ import httpx
 import aiofiles
 from loguru import logger
 
-logger.add("get_token_log.log")
-
 
 FacebookGraphAPIUrl = Literal["base", "upload", "video"]
 
